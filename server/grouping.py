@@ -4,29 +4,42 @@ from __future__ import annotations
 
 from collections import deque
 from statistics import median
-from typing import Iterable, List, Sequence, Tuple
+from typing import Any, Iterable, List, Literal, Sequence, TYPE_CHECKING, cast
+
+from .types import BBox, OCRWord, Point, WordGroup
+
+if TYPE_CHECKING:
+    from typing import Protocol
+
+    class _KDTreeProtocol(Protocol):
+        def __init__(self, data: Sequence[Point]) -> None: ...
+
+        def query_ball_point(self, x: Point, r: float) -> List[int]: ...
+
+    KDTreeType = type[_KDTreeProtocol]
+else:  # pragma: no cover - hint for static analyzers
+    KDTreeType = Any
 
 try:
-    from scipy.spatial import KDTree  # type: ignore
+    from scipy.spatial import KDTree as _SciPyKDTree  # type: ignore[import]
 except ImportError:  # pragma: no cover - optional dependency
-    KDTree = None  # type: ignore
+    _SciPyKDTree = None
 
-Point = Tuple[float, float]
-Box = Tuple[float, float, float, float]
+KDTree: KDTreeType | None = cast(KDTreeType | None, _SciPyKDTree)
 
 
-def _polygon_to_box(poly: Sequence[Sequence[float]]) -> Box:
+def _polygon_to_box(poly: Sequence[Sequence[float]]) -> BBox:
     xs = [p[0] for p in poly]
     ys = [p[1] for p in poly]
     return (min(xs), min(ys), max(xs), max(ys))
 
 
-def _box_center(box: Box) -> Point:
+def _box_center(box: BBox) -> Point:
     x0, y0, x1, y1 = box
     return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
 
 
-def _box_height(box: Box) -> float:
+def _box_height(box: BBox) -> float:
     return max(1.0, box[3] - box[1])
 
 
@@ -39,6 +52,8 @@ def _variance(values: Iterable[float]) -> float:
 
 
 def _neighbors_with_kdtree(points: List[Point], radius: float) -> List[List[int]]:
+    if KDTree is None:
+        return _neighbors_naive(points, radius)
     tree = KDTree(points)
     adjacency: List[List[int]] = [[] for _ in points]
     for idx, point in enumerate(points):
@@ -60,7 +75,7 @@ def _neighbors_naive(points: List[Point], radius: float) -> List[List[int]]:
 
 
 def _connected_components(adjacency: List[List[int]]) -> List[List[int]]:
-    seen = set()
+    seen: set[int] = set()
     components: List[List[int]] = []
     for start in range(len(adjacency)):
         if start in seen:
@@ -78,11 +93,11 @@ def _connected_components(adjacency: List[List[int]]) -> List[List[int]]:
     return components
 
 
-def group_words(words: Sequence[dict]) -> List[dict]:
+def group_words(words: Sequence[OCRWord]) -> List[WordGroup]:
     """Group OCR word entries into clusters."""
     if not words:
         return []
-    boxes: List[Box] = [_polygon_to_box(word["poly"]) for word in words]
+    boxes: List[BBox] = [_polygon_to_box(word["poly"]) for word in words]
     centers: List[Point] = [_box_center(box) for box in boxes]
     heights = [_box_height(box) for box in boxes]
     height_med = median(heights) if heights else 20.0
@@ -93,7 +108,7 @@ def group_words(words: Sequence[dict]) -> List[dict]:
         adjacency = _neighbors_naive(centers, radius)
     components = _connected_components(adjacency)
 
-    groups: List[dict] = []
+    groups: List[WordGroup] = []
     for idx, comp in enumerate(components):
         x0 = min(boxes[i][0] for i in comp)
         y0 = min(boxes[i][1] for i in comp)
@@ -103,12 +118,12 @@ def group_words(words: Sequence[dict]) -> List[dict]:
         ys = [centers[i][1] for i in comp]
         var_x = _variance(xs)
         var_y = _variance(ys)
-        orientation = "vertical" if var_y > var_x * 1.3 else "horizontal"
+        orientation: Literal["vertical", "horizontal"] = "vertical" if var_y > var_x * 1.3 else "horizontal"
         groups.append(
             {
                 "id": f"g_{idx}",
                 "bbox": (x0, y0, x1, y1),
-                "word_idx": comp,
+                "word_idx": list(comp),
                 "orientation": orientation,
             }
         )

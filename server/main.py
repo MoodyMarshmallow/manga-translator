@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 from fastapi import FastAPI, HTTPException
@@ -15,10 +15,12 @@ from PIL import Image
 from .grouping import group_words
 from .ocr import document_ocr
 from .translate import translate_groups_kr_to_en
+from .translate import translate_groups_jp_to_en
+from .types import OCRWord, WordGroup
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Manga Translator API", version="0.1.0")
+app: FastAPI = FastAPI(title="Manga Translator API", version="0.1.0")
 
 
 class Size(BaseModel):
@@ -52,11 +54,11 @@ class AnalyzeRequest(BaseModel):
 def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
     image_bytes = req.load_bytes()
     words, _ = document_ocr(image_bytes, language_hint=req.language_hint)
-    groups = group_words(words)
+    groups: List[WordGroup] = group_words(words)
 
     for group in groups:
-        indices = group["word_idx"]
-        words_in_group = [words[i] for i in indices]
+        indices: List[int] = group["word_idx"]
+        words_in_group: List[OCRWord] = [words[i] for i in indices]
         if group["orientation"] == "vertical":
             words_in_group.sort(
                 key=lambda w: (
@@ -81,7 +83,7 @@ def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
     with Image.open(io.BytesIO(image_bytes)) as im:
         width, height = im.size
 
-    response_groups = []
+    response_groups: List[Dict[str, Any]] = []
     for group in groups:
         x0, y0, x1, y1 = group["bbox"]
         response_groups.append(

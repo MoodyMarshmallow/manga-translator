@@ -1,0 +1,6 @@
+{
+  "include": ["server"],
+  "typeCheckingMode": "strict",
+  "venvPath": ".",
+  "venv": ".venv"
+}
