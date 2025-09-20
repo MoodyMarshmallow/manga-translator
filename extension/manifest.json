@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Manga Translator Overlay",
+  "version": "0.1.0",
+  "description": "Detects manga pages, sends them to a translation API, and overlays translated text bubbles.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost:8000/*",
+    "https://*/"
+  ],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Translate manga"
+  }
+}
