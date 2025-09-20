@@ -12,9 +12,9 @@ from typing import Any, Dict, Iterable, List, Protocol, Sequence, cast
 from .types import WordGroup
 
 # Constants for robust API calls
-BATCH_SIZE = 15
+BATCH_SIZE = 10  # Reduced from 15
 MAX_RETRIES = 3
-INITIAL_RETRY_DELAY_SECONDS = 2
+INITIAL_RETRY_DELAY_SECONDS = 5  # Increased from 2
 
 
 class _ChatCompletionsProtocol(Protocol):
@@ -134,7 +134,7 @@ def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
                     f"API call failed (attempt {attempt + 1}/{MAX_RETRIES}): {e}. Retrying in {delay:.1f}s..."
                 )
                 time.sleep(delay)
-                delay *= 2  # Exponential backoff
+                delay *= 1.5  # Gentler backoff
 
         if response:
             choices: Sequence[Any] = getattr(response, "choices", [])

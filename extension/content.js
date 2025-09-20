@@ -26,6 +26,12 @@ function ensureStyleElement() {
       white-space: pre-wrap;
       word-break: break-word;
       mix-blend-mode: lighten;
+      /* New styles for better text fitting and alignment */
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      overflow: hidden;
     }
   `;
   document.head.appendChild(style);
@@ -154,7 +160,6 @@ function renderOverlays(state) {
   const scaleX = rect.width / ocrSize.w;
   const scaleY = rect.height / ocrSize.h;
 
-  // Ensure overlay count matches groups
   const groups = latestResult.groups || [];
   while (state.overlays.length > groups.length) {
     const el = state.overlays.pop();
@@ -176,24 +181,30 @@ function renderOverlays(state) {
     el.style.left = `${left}px`;
     el.style.top = `${top}px`;
     el.style.width = `${width}px`;
-    el.style.minHeight = `${height}px`;
+    el.style.height = `${height}px`; // Use height instead of minHeight
     el.textContent = group.en_text || group.kr_text || "";
-    adjustFontSize(el, height);
+    adjustFontSize(el); // Updated function call
   }
 }
 
-function adjustFontSize(el, targetHeight) {
-  if (!targetHeight || targetHeight <= 0) return;
-  let size = 18;
-  const minSize = 10;
-  el.style.fontSize = `${size}px`;
-  el.style.lineHeight = "1.35";
-  for (let i = 0; i < 5; i += 1) {
-    if (el.scrollHeight <= targetHeight || size <= minSize) {
-      break;
-    }
-    size = Math.max(minSize, size - 2);
-    el.style.fontSize = `${size}px`;
+/**
+ * NEW: Dynamically shrinks font size until the text fits within the element's
+ * width and height.
+ */
+function adjustFontSize(el) {
+  const minSize = 8;
+  const maxSize = 20; // Start a bit larger
+  el.style.fontSize = `${maxSize}px`;
+  el.style.lineHeight = "1.3";
+
+  let currentSize = maxSize;
+  // Loop until the text fits or we hit the minimum font size
+  while (
+    (el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth) &&
+    currentSize > minSize
+  ) {
+    currentSize -= 1;
+    el.style.fontSize = `${currentSize}px`;
   }
 }
 
