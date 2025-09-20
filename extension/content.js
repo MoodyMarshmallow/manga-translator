@@ -131,6 +131,7 @@ function requestAnalysis(img) {
       id,
       src: img.currentSrc || img.src,
       intrinsicSize,
+      referrer: window.location.href,
     },
   });
 }
@@ -176,7 +177,7 @@ function renderOverlays(state) {
     el.style.top = `${top}px`;
     el.style.width = `${width}px`;
     el.style.minHeight = `${height}px`;
-    el.textContent = group.en_text || group.jp_text || "";
+    el.textContent = group.en_text || group.kr_text || "";
     adjustFontSize(el, height);
   }
 }

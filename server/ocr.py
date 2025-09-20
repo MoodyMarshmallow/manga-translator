@@ -26,7 +26,7 @@ def _fallback_words(image_bytes: bytes) -> List[dict]:
     return [{"text": "[ocr unavailable]", "poly": poly}]
 
 
-def document_ocr(image_bytes: bytes, language_hint: str | None = "ja") -> Tuple[List[dict], object | None]:
+def document_ocr(image_bytes: bytes, language_hint: str | None = "ko") -> Tuple[List[dict], object | None]:
     """Run Google Cloud Vision OCR if available, otherwise fall back.
 
     Returns a tuple of (words, raw_response). Each word is a mapping with keys

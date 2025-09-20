@@ -43,7 +43,7 @@ TRANSLATION_SCHEMA = {
 
 
 def _client() -> "Cerebras" | None:
-    api_key = os.environ.get("CEREBRAS_API_KEY")
+    api_key = "csk-r8ym8cw3jcrtfmdfjh3cmchyfthcwr8nt4mkymyfrthkcr42"
     if Cerebras is None or not api_key:
         if Cerebras is None:
             logger.warning("cerebras-cloud-sdk not installed; returning fallback translations")
@@ -53,18 +53,18 @@ def _client() -> "Cerebras" | None:
     return Cerebras(api_key=api_key)
 
 
-def translate_groups_jp_to_en(groups: Iterable[dict]) -> Dict[str, str]:
+def translate_groups_kr_to_en(groups: Iterable[dict]) -> Dict[str, str]:
     groups = list(groups)
     client = _client()
     if client is None:
-        return {g["id"]: g.get("jp_text", "") for g in groups}
+        return {g["id"]: g.get("kr_text", "") for g in groups}
 
-    payload = [{"id": g["id"], "jp": g.get("jp_text", "")} for g in groups]
+    payload = [{"id": g["id"], "kr": g.get("kr_text", "")} for g in groups]
     system_prompt = (
-        "You are a professional manga translator. Translate Japanese to natural, "
+        "You are a professional manhwa translator. Translate Korean to natural, "
         "concise English while preserving honorifics when present. Return JSON only."
     )
-    user_prompt = "Translate the following Japanese text entries to English: \n" + json.dumps(payload, ensure_ascii=False)
+    user_prompt = "Translate the following Korean text entries to English: \n" + json.dumps(payload, ensure_ascii=False)
     response = client.chat.completions.create(
         model="llama-3.3-70b",
         messages=[
@@ -79,4 +79,4 @@ def translate_groups_jp_to_en(groups: Iterable[dict]) -> Dict[str, str]:
     return {item["id"]: item.get("en", "") for item in data.get("items", [])}
 
 
-__all__ = ["translate_groups_jp_to_en"]
+__all__ = ["translate_groups_kr_to_en"]

@@ -14,7 +14,7 @@ from PIL import Image
 
 from .grouping import group_words
 from .ocr import document_ocr
-from .translate import translate_groups_jp_to_en
+from .translate import translate_groups_kr_to_en
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +72,9 @@ def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
                     min(p[0] for p in w["poly"]),
                 )
             )
-        group["jp_text"] = " ".join(word["text"] for word in words_in_group)
+        group["kr_text"] = " ".join(word["text"] for word in words_in_group)
 
-    translation_map = translate_groups_jp_to_en(groups)
+    translation_map = translate_groups_kr_to_en(groups)
     for group in groups:
         group["en_text"] = translation_map.get(group["id"], "")
 
@@ -89,7 +89,7 @@ def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
                 "id": group["id"],
                 "bbox": {"x0": int(x0), "y0": int(y0), "x1": int(x1), "y1": int(y1)},
                 "orientation": group["orientation"],
-                "jp_text": group.get("jp_text", ""),
+                "kr_text": group.get("kr_text", ""),
                 "en_text": group.get("en_text", ""),
             }
         )
