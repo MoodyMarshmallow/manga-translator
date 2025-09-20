@@ -1,16 +1,3 @@
-Here’s a **ship-ready technical spec** for your Chrome extension, built exactly the way you described:
-
-* **Scrape manga images in-page**
-* **Send images to a Python backend**
-* **Python does OCR with Google Cloud Vision**
-* **Group word boxes with a KD‑Tree**
-* **Translate via a Cerebras LLM**
-* **Overlay English text back onto the page** (DIVs positioned over original bubbles)
-
-I’ll keep the prose light, the details heavy, and flag uncertainties where they exist.
-
----
-
 ## 0) High-level architecture
 
 ```
