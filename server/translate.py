@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
-import os
+#import os
 from typing import Any, Dict, Iterable, List, Protocol, Sequence, cast
 
 from .types import WordGroup
@@ -79,7 +79,7 @@ def _load_cerebras_class() -> Any | None:
 
 
 def _client() -> CerebrasClient | None:
-    api_key = os.environ.get("CEREBRAS_API_KEY")
+    api_key = "csk-rpce3dvnyp89mtntdyt9936dve58htjhhe3whvyyv9k9wd8w" #os.environ.get("CEREBRAS_API_KEY")
     cerebras_class = _load_cerebras_class()
     if cerebras_class is None or not api_key:
         if cerebras_class is None:
@@ -90,13 +90,13 @@ def _client() -> CerebrasClient | None:
     return cast(CerebrasClient, cerebras_class(api_key=api_key))
 
 
-def translate_groups_kr_to_en(groups: Iterable[dict]) -> Dict[str, str]:
-    groups = list(groups)
+def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
+    groups_list: List[WordGroup] = list(groups)
     client = _client()
     if client is None:
-        return {g["id"]: g.get("kr_text", "") for g in groups}
+        return {g["id"]: g.get("kr_text", "") for g in groups_list}
 
-    payload = [{"id": g["id"], "kr": g.get("kr_text", "")} for g in groups]
+    payload: List[Dict[str, str]] = [{"id": g["id"], "kr": g.get("kr_text", "")} for g in groups_list]
     system_prompt = (
         "You are a professional manhwa translator. Translate Korean to natural, "
         "concise English while preserving honorifics when present. Return JSON only."

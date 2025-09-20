@@ -15,7 +15,6 @@ from PIL import Image
 from .grouping import group_words
 from .ocr import document_ocr
 from .translate import translate_groups_kr_to_en
-from .translate import translate_groups_jp_to_en
 from .types import OCRWord, WordGroup
 
 logger = logging.getLogger(__name__)
@@ -32,7 +31,7 @@ class AnalyzeRequest(BaseModel):
     image_url: Optional[str] = None
     image_b64: Optional[str] = None
     intrinsic_size: Optional[Size] = None
-    language_hint: Optional[str] = Field(default="ja", description="Language hint for OCR")
+    language_hint: Optional[str] = Field(default="ko", description="Language hint for OCR")
 
     def load_bytes(self) -> bytes:
         if self.image_b64:

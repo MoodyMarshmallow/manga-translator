@@ -28,7 +28,7 @@ class WordGroupRequired(TypedDict):
 class WordGroup(WordGroupRequired, total=False):
     """Grouped words with optional translation metadata."""
 
-    jp_text: str
+    kr_text: str
     en_text: str
 
 
