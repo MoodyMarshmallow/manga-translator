@@ -77,10 +77,11 @@ def document_ocr(image_bytes: bytes, language_hint: str | None = "ko") -> Tuple[
                     words.append({"text": text, "poly": verts})
 
     if not words:
-        logger.info("Vision OCR returned no words; returning empty list")
-        # This is the only line that changed.
-        # Instead of the fallback, we now return an empty list.
-        return [], response
+        logger.info("Vision OCR returned no words; providing fallback message")
+        fallback = _fallback_words(image_bytes)
+        if fallback:
+            fallback[0]["text"] = "[OCR failed: no text detected]"
+        return fallback, response
     return words, response
 
 

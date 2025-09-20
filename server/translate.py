@@ -6,6 +6,7 @@ import importlib
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, Iterable, List, Protocol, Sequence, cast
 
@@ -15,6 +16,7 @@ from .types import WordGroup
 BATCH_SIZE = 10  # Reduced from 15
 MAX_RETRIES = 3
 INITIAL_RETRY_DELAY_SECONDS = 5  # Increased from 2
+MIN_SECONDS_BETWEEN_CALLS = 1.2  # Throttle to stay below Cerebras 1 RPS limit
 
 
 class _ChatCompletionsProtocol(Protocol):
@@ -41,6 +43,9 @@ _cerebras_class: Any | None = None
 _cerebras_attempted = False
 
 logger = logging.getLogger(__name__)
+
+_rate_limit_lock = threading.Lock()
+_last_api_call: float = 0.0
 
 TRANSLATION_SCHEMA = {
     "type": "json_schema",
@@ -96,6 +101,52 @@ def _client() -> CerebrasClient | None:
     return cast(CerebrasClient, cerebras_class(api_key=api_key))
 
 
+def _respect_rate_limit() -> None:
+    """Sleep just enough to respect Cerebras' per-second quota across threads."""
+
+    if MIN_SECONDS_BETWEEN_CALLS <= 0:
+        return
+
+    global _last_api_call
+    with _rate_limit_lock:
+        now = time.monotonic()
+        wait = _last_api_call + MIN_SECONDS_BETWEEN_CALLS - now
+        if wait > 0:
+            logger.debug("Throttling Cerebras call for %.2fs to respect rate limits", wait)
+            time.sleep(wait)
+            now = time.monotonic()
+        _last_api_call = now
+
+
+def _retry_after_seconds(error: Exception) -> float | None:
+    """Extract a Retry-After hint if the SDK surfaced one."""
+
+    header_value: str | None = None
+    response = getattr(error, "response", None)
+    if response is not None:
+        headers = getattr(response, "headers", None)
+        if headers and hasattr(headers, "get"):
+            header_value = headers.get("Retry-After")
+    if header_value is None:
+        headers = getattr(error, "headers", None)
+        if headers and hasattr(headers, "get"):
+            header_value = headers.get("Retry-After")
+    if not header_value:
+        return None
+    try:
+        return float(header_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _status_code_from_error(error: Exception) -> int | None:
+    response = getattr(error, "response", None)
+    if response is not None and hasattr(response, "status_code"):
+        return cast(int, getattr(response, "status_code", None))
+    status = getattr(error, "status_code", None)
+    return cast(int | None, status)
+
+
 def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
     groups_list: List[WordGroup] = list(groups)
     client = _client()
@@ -109,7 +160,7 @@ def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
         payload: List[Dict[str, str]] = [{"id": g["id"], "kr": g.get("kr_text", "")} for g in batch]
         system_prompt = (
             "You are a professional manhwa translator. Translate Korean to natural, "
-            "concise English while preserving honorifics when present. Return JSON only."
+            "concise English while preserving honorifics when present. Remember translate Korean to English. Return JSON only."
         )
         user_prompt = "Translate the following Korean text entries to English: \n" + json.dumps(
             payload, ensure_ascii=False
@@ -119,6 +170,7 @@ def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
         delay = float(INITIAL_RETRY_DELAY_SECONDS)
         for attempt in range(MAX_RETRIES):
             try:
+                _respect_rate_limit()
                 response = client.chat.completions.create(
                     model="llama-3.3-70b",
                     messages=[
@@ -130,11 +182,21 @@ def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
                 )
                 break  # Success! Exit the retry loop.
             except Exception as e:
+                status_code = _status_code_from_error(e)
                 logger.warning(
-                    f"API call failed (attempt {attempt + 1}/{MAX_RETRIES}): {e}. Retrying in {delay:.1f}s..."
+                    "Cerebras API call failed (attempt %s/%s, status %s): %s. Retrying in %.1fs...",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    status_code if status_code is not None else "unknown",
+                    e,
+                    delay,
                 )
                 time.sleep(delay)
-                delay *= 1.5  # Gentler backoff
+                retry_hint = _retry_after_seconds(e)
+                if retry_hint is not None:
+                    delay = max(retry_hint, delay * 1.5)
+                else:
+                    delay *= 1.5  # Gentler backoff
 
         if response:
             choices: Sequence[Any] = getattr(response, "choices", [])
@@ -143,15 +205,28 @@ def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
                 content = str(getattr(message, "content", ""))
                 try:
                     data = json.loads(content)
-                    for item in data.get("items", []):
-                        all_translations[item["id"]] = item.get("en", "")
+                    translations = {
+                        item.get("id", ""): item.get("en", "")
+                        for item in data.get("items", [])
+                        if item.get("id")
+                    }
+                    for group in batch:
+                        text = translations.get(group["id"], group.get("kr_text", ""))
+                        all_translations[group["id"]] = text or group.get("kr_text", "")
                 except json.JSONDecodeError:
                     logger.error(f"Failed to decode JSON from API response: {content}")
-        else:
-            logger.error(f"API call failed for batch starting at index {i} after {MAX_RETRIES} retries.")
-            # Mark items in the failed batch as untranslated so the app doesn't crash
+                    for group in batch:
+                        all_translations[group["id"]] = group.get("kr_text", "")
+                continue
+        # Ensure every group in the batch receives some text, even after failures.
+        if response is None or not choices:
+            logger.error(
+                "API call failed for batch starting at index %s after %s retries.",
+                i,
+                MAX_RETRIES,
+            )
             for group in batch:
-                all_translations[group["id"]] = f"[Translation failed for: {group.get('kr_text', '')}]"
+                all_translations[group["id"]] = group.get("kr_text", "")
 
     return all_translations
 
