@@ -57,20 +57,30 @@ def document_ocr(image_bytes: bytes, language_hint: str | None = "ko") -> Tuple[
         for block in blocks:
             paragraphs: Iterable[Any] = getattr(block, "paragraphs", [])
             for paragraph in paragraphs:
+                # Reconstruct the full text of the paragraph from its words
+                para_words: List[str] = []
                 vision_words: Iterable[Any] = getattr(paragraph, "words", [])
                 for word in vision_words:
                     symbols: Iterable[Any] = getattr(word, "symbols", [])
-                    text = "".join(str(getattr(symbol, "text", "")) for symbol in symbols)
-                    bounding_box: Any = getattr(word, "bounding_box", None)
-                    vertices: Iterable[Any] = getattr(bounding_box, "vertices", [])
-                    verts: WordPoly = [
-                        (int(getattr(vertex, "x", 0)), int(getattr(vertex, "y", 0)))
-                        for vertex in vertices
-                    ]
+                    para_words.append("".join(str(getattr(symbol, "text", "")) for symbol in symbols))
+                text = " ".join(para_words)
+
+                # Get the bounding box for the entire paragraph
+                bounding_box: Any = getattr(paragraph, "bounding_box", None)
+                vertices: Iterable[Any] = getattr(bounding_box, "vertices", [])
+                verts: WordPoly = [
+                    (int(getattr(vertex, "x", 0)), int(getattr(vertex, "y", 0)))
+                    for vertex in vertices
+                ]
+
+                if text and verts:
                     words.append({"text": text, "poly": verts})
+
     if not words:
-        logger.info("Vision OCR returned no words; using fallback bubble")
-        return _fallback_words(image_bytes), response
+        logger.info("Vision OCR returned no words; returning empty list")
+        # This is the only line that changed.
+        # Instead of the fallback, we now return an empty list.
+        return [], response
     return words, response
 
 
