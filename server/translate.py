@@ -8,14 +8,15 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, Iterable, List, Protocol, Sequence, cast
+from typing import Any, Dict, Iterable, List, Protocol, Sequence, Tuple, cast
 
 from .types import WordGroup
 
 # Constants for robust API calls
-BATCH_SIZE = 10  # Reduced from 15
+MAX_ITEMS_PER_REQUEST = 40  # Larger batches reduce total API calls
+MAX_JSON_CHARS_PER_REQUEST = 12_000  # Guardrail to stay within context limits
 MAX_RETRIES = 3
-INITIAL_RETRY_DELAY_SECONDS = 5  # Increased from 2
+INITIAL_RETRY_DELAY_SECONDS = 3
 MIN_SECONDS_BETWEEN_CALLS = 1.2  # Throttle to stay below Cerebras 1 RPS limit
 
 
@@ -155,6 +156,41 @@ def _group_sort_key(group: WordGroup) -> tuple[float, float]:
     return (y0, x0)
 
 
+def _batched_groups(
+    groups: Sequence[WordGroup],
+) -> Iterable[Tuple[List[WordGroup], List[Dict[str, str]]]]:
+    """Yield groups and serialized payloads sized for larger JSON batches."""
+
+    prefix_size = len("{\"items\":[")
+    suffix_size = len("]}")
+    current_groups: List[WordGroup] = []
+    current_payload: List[Dict[str, str]] = []
+    current_size = prefix_size + suffix_size
+
+    for group in groups:
+        payload_entry = {"id": group["id"], "kr": group.get("kr_text", "")}
+        entry_json = json.dumps(payload_entry, ensure_ascii=False)
+        entry_size = len(entry_json)
+        separator_size = 1 if current_payload else 0
+
+        if current_payload and (
+            len(current_payload) >= MAX_ITEMS_PER_REQUEST
+            or current_size + separator_size + entry_size > MAX_JSON_CHARS_PER_REQUEST
+        ):
+            yield current_groups, current_payload
+            current_groups = []
+            current_payload = []
+            current_size = prefix_size + suffix_size
+            separator_size = 0
+
+        current_groups.append(group)
+        current_payload.append(payload_entry)
+        current_size += separator_size + entry_size
+
+    if current_payload:
+        yield current_groups, current_payload
+
+
 def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
     groups_list: List[WordGroup] = list(groups)
     groups_list.sort(key=_group_sort_key)
@@ -163,16 +199,16 @@ def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
         return {g["id"]: g.get("kr_text", "") for g in groups_list}
 
     all_translations: Dict[str, str] = {}
-    # Process groups in smaller, more reliable batches
-    for i in range(0, len(groups_list), BATCH_SIZE):
-        batch = groups_list[i : i + BATCH_SIZE]
-        payload: List[Dict[str, str]] = [{"id": g["id"], "kr": g.get("kr_text", "")} for g in batch]
+    # Process groups in larger JSON batches to minimize API calls
+    for batch_index, (batch_groups, payload) in enumerate(_batched_groups(groups_list)):
+        payload_json = json.dumps({"items": payload}, ensure_ascii=False)
         system_prompt = (
             "You are a professional manhwa translator. Translate Korean to natural, "
             "concise English while preserving honorifics when present. Remember translate Korean to English. Return JSON only."
         )
-        user_prompt = "Translate the following Korean text entries to English: \n" + json.dumps(
-            payload, ensure_ascii=False
+        user_prompt = (
+            "Translate each Korean entry in the following JSON payload to English. "
+            "Respond with JSON matching the schema and include every id.\n" + payload_json
         )
 
         response = None
@@ -219,22 +255,23 @@ def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
                         for item in data.get("items", [])
                         if item.get("id")
                     }
-                    for group in batch:
+                    for group in batch_groups:
                         text = translations.get(group["id"], group.get("kr_text", ""))
                         all_translations[group["id"]] = text or group.get("kr_text", "")
                 except json.JSONDecodeError:
                     logger.error(f"Failed to decode JSON from API response: {content}")
-                    for group in batch:
+                    for group in batch_groups:
                         all_translations[group["id"]] = group.get("kr_text", "")
                 continue
         # Ensure every group in the batch receives some text, even after failures.
         if response is None or not choices:
             logger.error(
-                "API call failed for batch starting at index %s after %s retries.",
-                i,
+                "API call failed for batch %s (size %s) after %s retries.",
+                batch_index,
+                len(batch_groups),
                 MAX_RETRIES,
             )
-            for group in batch:
+            for group in batch_groups:
                 all_translations[group["id"]] = group.get("kr_text", "")
 
     return all_translations
