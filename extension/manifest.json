@@ -6,7 +6,8 @@
   "permissions": [
     "activeTab",
     "scripting",
-    "storage"
+    "storage",
+    "tabs"
   ],
   "host_permissions": [
     "http://localhost:8000/*",
@@ -23,6 +24,7 @@
     }
   ],
   "action": {
-    "default_title": "Translate manga"
+    "default_title": "Translate manga",
+    "default_popup": "popup.html"
   }
 }
