@@ -2,7 +2,8 @@ fastapi
 uvicorn[standard]
 requests
 pillow
+python-dotenv
 # Optional integrations for full functionality
-# google-cloud-vision
-# cerebras-cloud-sdk
-# scipy
+google-cloud-vision
+cerebras-cloud-sdk
+scipy
