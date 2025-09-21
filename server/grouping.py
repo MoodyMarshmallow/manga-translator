@@ -6,6 +6,8 @@ from collections import deque
 from statistics import median
 from typing import Any, Iterable, List, Literal, Sequence, TYPE_CHECKING, cast
 
+import math
+
 from .types import BBox, OCRWord, Point, WordGroup
 
 if TYPE_CHECKING:
@@ -49,6 +51,60 @@ def _variance(values: Iterable[float]) -> float:
         return 0.0
     mean = sum(values) / len(values)
     return sum((v - mean) ** 2 for v in values) / len(values)
+
+
+def _axis_gap(a0: float, a1: float, b0: float, b1: float) -> float:
+    if a1 < b0:
+        return b0 - a1
+    if b1 < a0:
+        return a0 - b1
+    return 0.0
+
+
+def _boxes_close(box_a: BBox, box_b: BBox, threshold: float) -> bool:
+    x0_a, y0_a, x1_a, y1_a = box_a
+    x0_b, y0_b, x1_b, y1_b = box_b
+    gap_x = _axis_gap(x0_a, x1_a, x0_b, x1_b)
+    gap_y = _axis_gap(y0_a, y1_a, y0_b, y1_b)
+    if gap_x == 0.0 and gap_y == 0.0:
+        return True
+    return math.hypot(gap_x, gap_y) <= threshold
+
+
+def _merge_adjacent_groups(groups: List[WordGroup], radius: float) -> List[WordGroup]:
+    if len(groups) <= 1:
+        return groups
+
+    proximity = max(12.0, radius * 0.6)
+    merged: List[WordGroup] = []
+    for group in sorted(groups, key=lambda g: (g["bbox"][1], g["bbox"][0])):
+        target = None
+        for existing in merged:
+            if existing["orientation"] != group["orientation"]:
+                continue
+            if _boxes_close(existing["bbox"], group["bbox"], proximity):
+                target = existing
+                break
+        if target is None:
+            merged.append({
+                "id": group["id"],
+                "bbox": tuple(group["bbox"]), # type: ignore
+                "word_idx": list(group["word_idx"]),
+                "orientation": group["orientation"],
+            })
+            continue
+        target["word_idx"].extend(group["word_idx"])
+        x0 = min(target["bbox"][0], group["bbox"][0])
+        y0 = min(target["bbox"][1], group["bbox"][1])
+        x1 = max(target["bbox"][2], group["bbox"][2])
+        y1 = max(target["bbox"][3], group["bbox"][3])
+        target["bbox"] = (x0, y0, x1, y1)
+
+    for idx, group in enumerate(merged):
+        group["word_idx"] = sorted(set(group["word_idx"]))
+        group["id"] = f"g_{idx}"
+
+    return merged
 
 
 def _neighbors_with_kdtree(points: List[Point], radius: float) -> List[List[int]]:
@@ -127,7 +183,7 @@ def group_words(words: Sequence[OCRWord]) -> List[WordGroup]:
                 "orientation": orientation,
             }
         )
-    return groups
+    return _merge_adjacent_groups(groups, radius)
 
 
 __all__ = ["group_words"]

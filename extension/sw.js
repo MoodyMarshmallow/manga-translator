@@ -33,6 +33,7 @@ async function callAnalyzeApi(payload, imageB64) {
     image_b64: imageB64,
     intrinsic_size: payload.intrinsicSize,
     language_hint: "ko",
+    context_id: payload.referrer || payload.src || null,
   };
   const res = await fetch(`${API_BASE_URL}/analyze`, {
     method: "POST",

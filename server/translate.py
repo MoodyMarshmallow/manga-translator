@@ -11,6 +11,7 @@ import time
 from typing import Any, Dict, Iterable, List, Protocol, Sequence, cast
 
 from .types import WordGroup
+from .context_store import ContextEntry
 
 # Constants for robust API calls
 BATCH_SIZE = 10  # Reduced from 15
@@ -155,7 +156,11 @@ def _group_sort_key(group: WordGroup) -> tuple[float, float]:
     return (y0, x0)
 
 
-def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
+def translate_groups_kr_to_en(
+    groups: Iterable[WordGroup],
+    *,
+    conversation_context: Sequence[ContextEntry] | None = None,
+) -> Dict[str, str]:
     groups_list: List[WordGroup] = list(groups)
     groups_list.sort(key=_group_sort_key)
     client = _client()
@@ -163,6 +168,18 @@ def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
         return {g["id"]: g.get("kr_text", "") for g in groups_list}
 
     all_translations: Dict[str, str] = {}
+    context_items: List[Dict[str, str]] = []
+    for item in conversation_context or []:
+        kr_text = item.get("kr", "")
+        en_text = item.get("en", "")
+        entry: Dict[str, str] = {}
+        if kr_text:
+            entry["kr"] = kr_text
+        if en_text:
+            entry["en"] = en_text
+        if entry:
+            context_items.append(entry)
+    context_json = json.dumps(context_items, ensure_ascii=False) if context_items else ""
     # Process groups in smaller, more reliable batches
     for i in range(0, len(groups_list), BATCH_SIZE):
         batch = groups_list[i : i + BATCH_SIZE]
@@ -171,9 +188,16 @@ def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
             "You are a professional manhwa translator. Translate Korean to natural, "
             "concise English while preserving honorifics when present. Remember translate Korean to English. Return JSON only."
         )
-        user_prompt = "Translate the following Korean text entries to English: \n" + json.dumps(
-            payload, ensure_ascii=False
+        if context_items:
+            system_prompt += " Maintain consistency with the supplied prior dialogue context."
+        user_sections = []
+        if context_json:
+            user_sections.append("Earlier conversation context:\n" + context_json) # type: ignore
+        user_sections.append( # type: ignore
+            "Translate the following Korean text entries to English: \n"
+            + json.dumps(payload, ensure_ascii=False)
         )
+        user_prompt = "\n\n".join(user_sections) # type: ignore
 
         response = None
         delay = float(INITIAL_RETRY_DELAY_SECONDS)
@@ -228,7 +252,7 @@ def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
                         all_translations[group["id"]] = group.get("kr_text", "")
                 continue
         # Ensure every group in the batch receives some text, even after failures.
-        if response is None or not choices:
+        if response is None or not choices: # type: ignore
             logger.error(
                 "API call failed for batch starting at index %s after %s retries.",
                 i,

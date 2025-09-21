@@ -15,6 +15,7 @@ from PIL import Image
 from .grouping import group_words
 from .ocr import document_ocr
 from .translate import translate_groups_kr_to_en
+from .context_store import ContextEntry, context_store
 from .types import OCRWord, WordGroup
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class AnalyzeRequest(BaseModel):
     image_b64: Optional[str] = None
     intrinsic_size: Optional[Size] = None
     language_hint: Optional[str] = Field(default="ko", description="Language hint for OCR")
+    context_id: Optional[str] = Field(default=None, description="Stable identifier for conversation context")
 
     def load_bytes(self) -> bytes:
         if self.image_b64:
@@ -75,9 +77,23 @@ def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
             )
         group["kr_text"] = " ".join(word["text"] for word in words_in_group)
 
-    translation_map = translate_groups_kr_to_en(groups)
+    context_entries: List[ContextEntry] = []
+    if req.context_id:
+        context_entries = context_store.get_recent(req.context_id)
+
+    translation_map = translate_groups_kr_to_en(groups, conversation_context=context_entries)
     for group in groups:
         group["en_text"] = translation_map.get(group["id"], "")
+
+    if req.context_id:
+        stored_entries: List[ContextEntry] = []
+        for group in groups:
+            entry: ContextEntry = {
+                "kr": group.get("kr_text", ""),
+                "en": group.get("en_text", ""),
+            }
+            stored_entries.append(entry)
+        context_store.append(req.context_id, stored_entries)
 
     with Image.open(io.BytesIO(image_bytes)) as im:
         width, height = im.size
