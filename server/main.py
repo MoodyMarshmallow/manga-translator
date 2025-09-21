@@ -11,6 +11,7 @@ import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from PIL import Image
+from dotenv import load_dotenv
 
 from .grouping import group_words
 from .ocr import document_ocr
@@ -18,6 +19,8 @@ from .translate import translate_groups_kr_to_en
 from .types import OCRWord, WordGroup
 
 logger = logging.getLogger(__name__)
+
+load_dotenv()
 
 app: FastAPI = FastAPI(title="Manga Translator API", version="0.1.0")
 
