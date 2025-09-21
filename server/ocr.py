@@ -76,12 +76,12 @@ def document_ocr(image_bytes: bytes, language_hint: str | None = "ko") -> Tuple[
                 if text and verts:
                     words.append({"text": text, "poly": verts})
 
-    if not words:
-        logger.info("Vision OCR returned no words; providing fallback message")
-        fallback = _fallback_words(image_bytes)
-        if fallback:
-            fallback[0]["text"] = "[OCR failed: no text detected]"
-        return fallback, response
+    # if not words:
+    #     logger.info("Vision OCR returned no words; providing fallback message")
+    #     fallback = _fallback_words(image_bytes)
+    #     if fallback:
+    #         fallback[0]["text"] = "[OCR failed: no text detected]"
+    #     return fallback, response
     return words, response
 
 
