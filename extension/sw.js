@@ -1,5 +1,13 @@
 const API_BASE_URL = "http://localhost:8000";
 
+function getTranslatorEnabled() {
+  return new Promise((resolve) => {
+    chrome.storage.sync.get({ translatorEnabled: true }, (result) => {
+      resolve(Boolean(result.translatorEnabled));
+    });
+  });
+}
+
 async function fetchImageAsBase64(url, referrer) {
   const headers = new Headers();
   // Add the Referer header if it was provided
@@ -51,6 +59,10 @@ async function callAnalyzeApi(payload, imageB64) {
 
 async function analyzeImage(payload, sender) {
   try {
+    const enabled = await getTranslatorEnabled();
+    if (!enabled) {
+      return;
+    }
     const imageB64 = await fetchImageAsBase64(payload.src, payload.referrer);
     const data = await callAnalyzeApi(payload, imageB64);
     if (sender.tab?.id !== undefined) {

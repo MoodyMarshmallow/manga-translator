@@ -2,9 +2,19 @@ const MIN_IMAGE_AREA = 400 * 400;
 const PROCESSED_ATTR = "data-mt-processed";
 const STYLE_ID = "manga-translator-style";
 const OVERLAY_CLASS = "manga-translate";
+const CACHE_STORAGE_KEY = "translationCache";
+
 const IMAGE_STATE = new Map();
 let overlayRoot = null;
 let globalListenersBound = false;
+let extensionEnabled = true;
+let translationCache = {};
+let cacheLoaded = false;
+let bootstrapQueued = false;
+let lastInteractedImageId = null;
+let currentVisibleImageId = null;
+let visibilityObserver = null;
+const visibilityRatios = new Map();
 
 function ensureStyleElement() {
   if (document.getElementById(STYLE_ID)) {
@@ -26,7 +36,6 @@ function ensureStyleElement() {
       white-space: pre-wrap;
       word-break: break-word;
       mix-blend-mode: lighten;
-      /* New styles for better text fitting and alignment */
       display: flex;
       align-items: center;
       justify-content: center;
@@ -56,6 +65,7 @@ function ensureOverlayRoot() {
 function bindGlobalListeners() {
   if (globalListenersBound) return;
   const handle = () => {
+    if (!extensionEnabled) return;
     for (const state of IMAGE_STATE.values()) {
       if (state.latestResult) {
         renderOverlays(state);
@@ -67,6 +77,75 @@ function bindGlobalListeners() {
   globalListenersBound = true;
 }
 
+function recomputeCurrentVisible() {
+  let bestId = null;
+  let bestRatio = 0;
+  for (const [id, ratio] of visibilityRatios.entries()) {
+    if (ratio > bestRatio) {
+      bestRatio = ratio;
+      bestId = id;
+    }
+  }
+  if (bestRatio < 0.05) {
+    bestId = null;
+  }
+  if (currentVisibleImageId !== bestId) {
+    currentVisibleImageId = bestId;
+  }
+}
+
+function ensureVisibilityObserver() {
+  if (visibilityObserver) return visibilityObserver;
+  visibilityObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        const img = entry.target;
+        const id = img?.dataset?.mtId;
+        if (!id) continue;
+        const ratio = entry.isIntersecting ? entry.intersectionRatio : 0;
+        visibilityRatios.set(id, ratio);
+      }
+      recomputeCurrentVisible();
+    },
+    {
+      threshold: [0, 0.05, 0.1, 0.25, 0.5, 0.75, 1],
+    }
+  );
+  return visibilityObserver;
+}
+
+function buildCacheKey(src, size) {
+  const width = size?.w ?? size?.width ?? 0;
+  const height = size?.h ?? size?.height ?? 0;
+  return `${src}__${width}x${height}`;
+}
+
+function getCachedEntry(key) {
+  if (!key) return null;
+  const entry = translationCache[key];
+  if (!entry) {
+    return null;
+  }
+  if (entry.data) {
+    return entry;
+  }
+  return { data: entry, timestamp: Date.now() };
+}
+
+function storeCacheEntry(key, data) {
+  if (!key || !data) return;
+  translationCache[key] = { data, timestamp: Date.now() };
+  chrome.storage.local.set({ [CACHE_STORAGE_KEY]: translationCache });
+}
+
+function deleteCacheEntry(key) {
+  if (!key) return;
+  if (translationCache[key]) {
+    delete translationCache[key];
+    chrome.storage.local.set({ [CACHE_STORAGE_KEY]: translationCache });
+  }
+}
+
 function generateImageId(img) {
   if (!img.dataset.mtId) {
     img.dataset.mtId = `mt-${Math.random().toString(36).slice(2, 9)}`;
@@ -76,24 +155,51 @@ function generateImageId(img) {
 
 function trackImage(img) {
   const id = generateImageId(img);
-  if (IMAGE_STATE.has(id)) {
-    return IMAGE_STATE.get(id);
+  let state = IMAGE_STATE.get(id);
+  if (!state) {
+    state = {
+      id,
+      img,
+      overlays: [],
+      latestResult: null,
+      resizeObserver: null,
+      cacheKey: "",
+      cacheKeyFallback: "",
+    };
+    const observer = new ResizeObserver(() => {
+      if (extensionEnabled && state.latestResult) {
+        renderOverlays(state);
+      }
+    });
+    observer.observe(img);
+    state.resizeObserver = observer;
+    IMAGE_STATE.set(id, state);
   }
-  const state = {
-    id,
-    img,
-    overlays: [],
-    latestResult: null,
-    resizeObserver: null,
-  };
-  const observer = new ResizeObserver(() => {
-    if (state.latestResult) {
-      renderOverlays(state);
-    }
-  });
-  observer.observe(img);
-  state.resizeObserver = observer;
-  IMAGE_STATE.set(id, state);
+  const visObserver = ensureVisibilityObserver();
+  try {
+    visObserver.observe(img);
+  } catch (err) {
+    console.warn("Failed to observe image visibility", err);
+  }
+  if (!visibilityRatios.has(id)) {
+    visibilityRatios.set(id, 0);
+    recomputeCurrentVisible();
+  }
+  const src = img.currentSrc || img.src || "";
+  const width = img.naturalWidth || img.width || 0;
+  const height = img.naturalHeight || img.height || 0;
+  const primaryKey = buildCacheKey(src, { w: width, h: height }) || src;
+  state.cacheKey = primaryKey;
+  state.cacheKeyFallback = src;
+  if (!img.dataset.mtTracked) {
+    const markActive = () => {
+      lastInteractedImageId = state.id;
+    };
+    img.addEventListener("mouseenter", markActive);
+    img.addEventListener("focus", markActive, true);
+    img.addEventListener("click", markActive);
+    img.dataset.mtTracked = "1";
+  }
   return state;
 }
 
@@ -107,42 +213,94 @@ function cleanupState(id) {
       console.warn("Failed to disconnect ResizeObserver", err);
     }
   }
+  if (visibilityObserver) {
+    try {
+      visibilityObserver.unobserve(state.img);
+    } catch (err) {
+      console.warn("Failed to unobserve image visibility", err);
+    }
+  }
   for (const el of state.overlays) {
     el.remove();
   }
+  visibilityRatios.delete(id);
   IMAGE_STATE.delete(id);
+  if (currentVisibleImageId === id) {
+    recomputeCurrentVisible();
+  }
 }
 
-function findCandidateImages() {
+function findCandidateImages(includeProcessed = false) {
   return Array.from(document.images).filter((img) => {
-    if (img.hasAttribute(PROCESSED_ATTR)) return false;
+    if (!includeProcessed && img.hasAttribute(PROCESSED_ATTR)) return false;
     const rect = img.getBoundingClientRect();
     const area = rect.width * rect.height;
     return area >= MIN_IMAGE_AREA;
   });
 }
 
-function requestAnalysis(img) {
-  if (!img || img.hasAttribute(PROCESSED_ATTR)) return;
+function applyCachedResult(img, cacheEntry) {
+  if (!cacheEntry) return;
+  const state = trackImage(img);
+  state.latestResult = cacheEntry.data;
+  img.setAttribute(PROCESSED_ATTR, "1");
+  renderOverlays(state);
+}
+
+function requestAnalysis(img, options = {}) {
+  const { force = false } = options;
+  if (!img) return;
+  const state = trackImage(img);
+  const cacheKey = state.cacheKey;
+  const fallbackKey = state.cacheKeyFallback;
+
+  if (!force) {
+    const cached = cacheLoaded
+      ? getCachedEntry(cacheKey) || getCachedEntry(fallbackKey)
+      : null;
+    if (cached) {
+      applyCachedResult(img, cached);
+      return;
+    }
+  }
+
+  if (!extensionEnabled && !force) return;
+
+  if (!force && img.hasAttribute(PROCESSED_ATTR)) {
+    return;
+  }
+  if (force) {
+    deleteCacheEntry(cacheKey);
+    if (fallbackKey && fallbackKey !== cacheKey) {
+      deleteCacheEntry(fallbackKey);
+    }
+    state.latestResult = null;
+    if (img.hasAttribute(PROCESSED_ATTR)) {
+      img.removeAttribute(PROCESSED_ATTR);
+    }
+  }
+
+  if (!extensionEnabled) return;
+
   img.setAttribute(PROCESSED_ATTR, "1");
   const intrinsicSize = {
     w: img.naturalWidth || img.width,
     h: img.naturalHeight || img.height,
   };
-  const id = generateImageId(img);
-  trackImage(img);
+  const payload = {
+    id: state.id,
+    src: img.currentSrc || img.src,
+    intrinsicSize,
+    referrer: window.location.href,
+  };
   chrome.runtime.sendMessage({
     type: "ANALYZE_IMAGE",
-    payload: {
-      id,
-      src: img.currentSrc || img.src,
-      intrinsicSize,
-      referrer: window.location.href,
-    },
+    payload,
   });
 }
 
 function renderOverlays(state) {
+  if (!extensionEnabled) return;
   ensureStyleElement();
   const root = ensureOverlayRoot();
   const { img, latestResult } = state;
@@ -181,24 +339,19 @@ function renderOverlays(state) {
     el.style.left = `${left}px`;
     el.style.top = `${top}px`;
     el.style.width = `${width}px`;
-    el.style.height = `${height}px`; // Use height instead of minHeight
+    el.style.height = `${height}px`;
     el.textContent = group.en_text || group.kr_text || "";
-    adjustFontSize(el); // Updated function call
+    adjustFontSize(el);
   }
 }
 
-/**
- * NEW: Dynamically shrinks font size until the text fits within the element's
- * width and height.
- */
 function adjustFontSize(el) {
   const minSize = 8;
-  const maxSize = 20; // Start a bit larger
+  const maxSize = 20;
   el.style.fontSize = `${maxSize}px`;
   el.style.lineHeight = "1.3";
 
   let currentSize = maxSize;
-  // Loop until the text fits or we hit the minimum font size
   while (
     (el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth) &&
     currentSize > minSize
@@ -209,6 +362,12 @@ function adjustFontSize(el) {
 }
 
 function bootstrap() {
+  if (!extensionEnabled) return;
+  if (!cacheLoaded) {
+    bootstrapQueued = true;
+    return;
+  }
+  bootstrapQueued = false;
   bindGlobalListeners();
   ensureStyleElement();
   ensureOverlayRoot();
@@ -218,23 +377,124 @@ function bootstrap() {
   }
 }
 
-chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type === "ANALYZE_RESULT") {
-    const { data, id } = message;
-    if (!id) return;
-    const state = IMAGE_STATE.get(id);
-    if (!state) return;
-    state.latestResult = data;
-    renderOverlays(state);
+function clearAllOverlays() {
+  const entries = Array.from(IMAGE_STATE.keys());
+  for (const id of entries) {
+    cleanupState(id);
   }
-  if (message?.type === "ANALYZE_ERROR") {
+  document.querySelectorAll(`img[${PROCESSED_ATTR}]`).forEach((img) => {
+    img.removeAttribute(PROCESSED_ATTR);
+  });
+  visibilityRatios.clear();
+  currentVisibleImageId = null;
+}
+
+function setExtensionEnabled(enabled) {
+  if (extensionEnabled === enabled) return;
+  extensionEnabled = enabled;
+  if (!extensionEnabled) {
+    clearAllOverlays();
+    lastInteractedImageId = null;
+  } else {
+    bootstrap();
+  }
+}
+
+function forceRetranslateImageById(id) {
+  if (!id) return false;
+  if (!extensionEnabled) return false;
+  const state = IMAGE_STATE.get(id);
+  const img = state?.img || Array.from(document.images).find((node) => node.dataset.mtId === id);
+  if (!img) return false;
+  requestAnalysis(img, { force: true });
+  return true;
+}
+
+function forceRetranslateAll() {
+  if (!extensionEnabled) return;
+  const candidates = findCandidateImages(true);
+  for (const img of candidates) {
+    requestAnalysis(img, { force: true });
+  }
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message) return;
+  if (message.type === "ANALYZE_RESULT") {
+    const { data, id, src } = message;
+    if (!id || !data) return;
+    let state = IMAGE_STATE.get(id);
+    if (!state && extensionEnabled) {
+      const imgNode = Array.from(document.images).find((node) => node.dataset.mtId === id);
+      if (imgNode) {
+        state = trackImage(imgNode);
+      }
+    }
+    if (state) {
+      state.latestResult = data;
+      if (extensionEnabled) {
+        state.img.setAttribute(PROCESSED_ATTR, "1");
+        renderOverlays(state);
+      }
+    }
+    const primaryKey = state?.cacheKey || buildCacheKey(src || "", data?.ocr_image_size || null);
+    const fallbackKey = state?.cacheKeyFallback || src || "";
+    if (primaryKey) {
+      storeCacheEntry(primaryKey, data);
+    }
+    if (fallbackKey && fallbackKey !== primaryKey) {
+      storeCacheEntry(fallbackKey, data);
+    }
+    return;
+  }
+  if (message.type === "ANALYZE_ERROR") {
     console.warn("Manga translator error:", message.error);
+    return;
+  }
+  if (message.type === "TRANSLATOR_TOGGLE") {
+    setExtensionEnabled(Boolean(message.enabled));
+    return;
+  }
+  if (message.type === "GET_TRANSLATOR_STATUS") {
+    sendResponse?.({
+      enabled: extensionEnabled,
+      hasLastImage: Boolean(lastInteractedImageId),
+      hasCurrentImage: Boolean(currentVisibleImageId),
+      currentImageId: currentVisibleImageId,
+    });
+    return;
+  }
+  if (message.type === "RETRANSLATE_ALL") {
+    forceRetranslateAll();
+    sendResponse?.({ ok: true });
+    return;
+  }
+  if (message.type === "RETRANSLATE_CURRENT") {
+    const targetId = message.imageId || currentVisibleImageId;
+    const ok = forceRetranslateImageById(targetId);
+    sendResponse?.({ ok, imageId: targetId });
+    return;
+  }
+  if (message.type === "RETRANSLATE_LAST") {
+    const targetId = message.imageId || lastInteractedImageId;
+    const ok = forceRetranslateImageById(targetId);
+    sendResponse?.({ ok, imageId: targetId });
+  }
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "sync" && changes.translatorEnabled) {
+    setExtensionEnabled(Boolean(changes.translatorEnabled.newValue));
+  }
+  if (area === "local" && changes[CACHE_STORAGE_KEY]) {
+    translationCache = changes[CACHE_STORAGE_KEY].newValue || {};
   }
 });
 
 const observer = new MutationObserver((mutations) => {
   for (const mutation of mutations) {
     mutation.addedNodes.forEach((node) => {
+      if (!extensionEnabled) return;
       if (node instanceof HTMLImageElement) {
         if (node.getBoundingClientRect().width * node.getBoundingClientRect().height >= MIN_IMAGE_AREA) {
           requestAnalysis(node);
@@ -255,7 +515,25 @@ observer.observe(document.documentElement || document.body, {
   subtree: true,
 });
 
-document.addEventListener("DOMContentLoaded", bootstrap, { once: true });
+chrome.storage.sync.get({ translatorEnabled: true }, (result) => {
+  extensionEnabled = Boolean(result.translatorEnabled);
+  chrome.storage.local.get({ [CACHE_STORAGE_KEY]: {} }, (cacheResult) => {
+    const stored = cacheResult[CACHE_STORAGE_KEY] || {};
+    translationCache = { ...stored, ...translationCache };
+    cacheLoaded = true;
+    if (extensionEnabled && (bootstrapQueued || document.readyState !== "loading")) {
+      bootstrap();
+    }
+  });
+});
+
+document.addEventListener(
+  "DOMContentLoaded",
+  () => {
+    bootstrap();
+  },
+  { once: true }
+);
 if (document.readyState === "interactive" || document.readyState === "complete") {
   bootstrap();
 }

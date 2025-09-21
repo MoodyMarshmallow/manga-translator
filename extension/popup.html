@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Manga Translator</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 12px 14px;
+        font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
+        background: #0f172a;
+        color: #f8fafc;
+        min-width: 220px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 16px;
+        font-weight: 700;
+      }
+      button {
+        width: 100%;
+        padding: 10px 12px;
+        border: none;
+        border-radius: 8px;
+        background: #38bdf8;
+        color: #0f172a;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.2s ease;
+      }
+      button:hover {
+        background: #0ea5e9;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+      .actions {
+        margin-top: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .actions button {
+        background: #1e293b;
+        color: #e2e8f0;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+      }
+      .actions button:hover {
+        background: #334155;
+      }
+      p {
+        margin: 10px 0 0;
+        font-size: 13px;
+        color: #cbd5f5;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Manga Translator</h1>
+    <button id="toggle" type="button">Loading…</button>
+    <p id="status">Checking current status…</p>
+    <div class="actions">
+      <button id="retranslate-last" type="button">Retranslate last image</button>
+      <button id="retranslate-current" type="button">Retranslate current image</button>
+      <button id="retranslate-all" type="button">Retranslate all images</button>
+    </div>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>
