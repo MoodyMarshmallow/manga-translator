@@ -147,8 +147,17 @@ def _status_code_from_error(error: Exception) -> int | None:
     return cast(int | None, status)
 
 
+def _group_sort_key(group: WordGroup) -> tuple[float, float]:
+    x0, y0, _, _ = group.get("bbox", (0.0, 0.0, 0.0, 0.0))
+    orientation = group.get("orientation", "horizontal")
+    if orientation == "vertical":
+        return (x0, y0)
+    return (y0, x0)
+
+
 def translate_groups_kr_to_en(groups: Iterable[WordGroup]) -> Dict[str, str]:
     groups_list: List[WordGroup] = list(groups)
+    groups_list.sort(key=_group_sort_key)
     client = _client()
     if client is None:
         return {g["id"]: g.get("kr_text", "") for g in groups_list}
