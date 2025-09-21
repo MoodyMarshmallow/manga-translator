@@ -203,43 +203,37 @@ def translate_groups_kr_to_en(
     if client is None:
         return {g["id"]: g.get("kr_text", "") for g in groups_list}
 
+    context_items: List[Dict[str, str]] = []
+    if conversation_context:
+        for entry in conversation_context:
+            context_entry: Dict[str, str] = {}
+            kr_text = entry.get("kr", "")
+            en_text = entry.get("en", "")
+            if kr_text:
+                context_entry["kr"] = kr_text
+            if en_text:
+                context_entry["en"] = en_text
+            if context_entry:
+                context_items.append(context_entry)
+    context_json = json.dumps({"items": context_items}, ensure_ascii=False) if context_items else ""
+
     all_translations: Dict[str, str] = {}
-    # Process groups in larger JSON batches to minimize API calls
     for batch_index, (batch_groups, payload) in enumerate(_batched_groups(groups_list)):
         payload_json = json.dumps({"items": payload}, ensure_ascii=False)
-    context_items: List[Dict[str, str]] = []
-    for item in conversation_context or []:
-        kr_text = item.get("kr", "")
-        en_text = item.get("en", "")
-        entry: Dict[str, str] = {}
-        if kr_text:
-            entry["kr"] = kr_text
-        if en_text:
-            entry["en"] = en_text
-        if entry:
-            context_items.append(entry)
-    context_json = json.dumps(context_items, ensure_ascii=False) if context_items else ""
-    # Process groups in smaller, more reliable batches
-    for i in range(0, len(groups_list), BATCH_SIZE):
-        batch = groups_list[i : i + BATCH_SIZE]
-        payload: List[Dict[str, str]] = [{"id": g["id"], "kr": g.get("kr_text", "")} for g in batch]
         system_prompt = (
-            "You are a professional manhwa translator. Translate Korean to natural, "
-            "concise English while preserving honorifics when present. Remember translate Korean to English. Return JSON only."
+            "You are a professional manhwa translator. Translate Korean to natural sounding English while preserving honorifics when present. Translate the meaning of the sentences rather than the exact word-for-word meaning. Remember to translate ALL Korean to ONLY English. Return JSON only."
         )
-        user_prompt = (
-            "Translate each Korean entry in the following JSON payload to English. "
-            "Respond with JSON matching the schema and include every id.\n" + payload_json
-        if context_items:
-            system_prompt += " Maintain consistency with the supplied prior dialogue context."
-        user_sections = []
         if context_json:
-            user_sections.append("Earlier conversation context:\n" + context_json) # type: ignore
-        user_sections.append( # type: ignore
-            "Translate the following Korean text entries to English: \n"
-            + json.dumps(payload, ensure_ascii=False)
+            system_prompt += " Maintain consistency with the supplied prior dialogue context."
+
+        user_sections: List[str] = []
+        if context_json:
+            user_sections.append("Earlier conversation context:\n" + context_json)
+        user_sections.append(
+            "Translate each Korean entry in the following JSON payload to English. Respond with JSON matching the schema and include every id.\n"
+            + payload_json
         )
-        user_prompt = "\n\n".join(user_sections) # type: ignore
+        user_prompt = "\n\n".join(user_sections)
 
         response = None
         delay = float(INITIAL_RETRY_DELAY_SECONDS)
@@ -247,7 +241,7 @@ def translate_groups_kr_to_en(
             try:
                 _respect_rate_limit()
                 response = client.chat.completions.create(
-                    model="llama-3.3-70b",
+                    model= "qwen-3-235b-a22b-instruct-2507",
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
@@ -255,7 +249,7 @@ def translate_groups_kr_to_en(
                     response_format=TRANSLATION_SCHEMA,
                     temperature=0.2,
                 )
-                break  # Success! Exit the retry loop.
+                break
             except Exception as e:
                 status_code = _status_code_from_error(e)
                 logger.warning(
@@ -271,7 +265,7 @@ def translate_groups_kr_to_en(
                 if retry_hint is not None:
                     delay = max(retry_hint, delay * 1.5)
                 else:
-                    delay *= 1.5  # Gentler backoff
+                    delay *= 1.5
 
         if response:
             choices: Sequence[Any] = getattr(response, "choices", [])
@@ -289,20 +283,19 @@ def translate_groups_kr_to_en(
                         text = translations.get(group["id"], group.get("kr_text", ""))
                         all_translations[group["id"]] = text or group.get("kr_text", "")
                 except json.JSONDecodeError:
-                    logger.error(f"Failed to decode JSON from API response: {content}")
+                    logger.error("Failed to decode JSON from API response: %s", content)
                     for group in batch_groups:
                         all_translations[group["id"]] = group.get("kr_text", "")
                 continue
-        # Ensure every group in the batch receives some text, even after failures.
-        if response is None or not choices: # type: ignore
-            logger.error(
-                "API call failed for batch %s (size %s) after %s retries.",
-                batch_index,
-                len(batch_groups),
-                MAX_RETRIES,
-            )
-            for group in batch_groups:
-                all_translations[group["id"]] = group.get("kr_text", "")
+
+        logger.error(
+            "API call failed for batch %s (size %s) after %s retries.",
+            batch_index,
+            len(batch_groups),
+            MAX_RETRIES,
+        )
+        for group in batch_groups:
+            all_translations[group["id"]] = group.get("kr_text", "")
 
     return all_translations
 

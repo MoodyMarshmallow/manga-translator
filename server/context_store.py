@@ -6,7 +6,7 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, TypedDict, cast
+from typing import Any, Dict, List, TypedDict, cast
 
 
 class ContextEntry(TypedDict, total=False):
@@ -29,21 +29,36 @@ class ContextStore:
             return
         try:
             with self._path.open("r", encoding="utf-8") as fh:
-                raw: Dict[str, List[Dict[str, str]]] = json.load(fh)
+                raw: Any = json.load(fh)
         except (json.JSONDecodeError, OSError, ValueError):
             return
+        if not isinstance(raw, dict):
+            return
+        raw_dict = cast(Dict[str, List[dict[str, object]]], raw)
         data: Dict[str, List[ContextEntry]] = {}
-        for key, value in raw.items():
+        for key, value in raw_dict.items():
             items: List[ContextEntry] = []
             for entry in value:
-                if not isinstance(entry, dict):
-                    continue
+                kr_value = entry.get("kr")
+                en_value = entry.get("en")
+                timestamp_value = entry.get("timestamp")
+                kr_text = kr_value if isinstance(kr_value, str) else ""
+                en_text = en_value if isinstance(en_value, str) else ""
+                if isinstance(timestamp_value, (int, float)):
+                    timestamp = float(timestamp_value)
+                elif isinstance(timestamp_value, str):
+                    try:
+                        timestamp = float(timestamp_value)
+                    except ValueError:
+                        timestamp = time.time()
+                else:
+                    timestamp = time.time()
                 mapped = cast(
                     ContextEntry,
                     {
-                        "kr": entry.get("kr", ""),
-                        "en": entry.get("en", ""),
-                        "timestamp": float(entry.get("timestamp", time.time())),
+                        "kr": kr_text,
+                        "en": en_text,
+                        "timestamp": timestamp,
                     },
                 )
                 items.append(mapped)
