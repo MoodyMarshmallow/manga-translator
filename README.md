@@ -1,4 +1,4 @@
-# Manga Translator MVP
+# Manga Translator
 
 This repository contains a minimal Chrome extension and a FastAPI backend that work together to translate manga pages. The extension discovers large images on the active tab, sends them to the backend for OCR + translation, and overlays English text bubbles back on the page.
 
