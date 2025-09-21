@@ -32,7 +32,12 @@ This repository contains a minimal Chrome extension and a FastAPI backend that w
 
    * **Google Cloud Vision** – install `google-cloud-vision` and provide credentials via `GOOGLE_APPLICATION_CREDENTIALS`.
    * **Cerebras** – install `cerebras-cloud-sdk` and export `CEREBRAS_API_KEY`.
-   * **SciPy** – install `scipy` to use the KDTree implementation for grouping.
+   * **Gemini** – set `TRANSLATOR_PROVIDER=gemini`, install `requests` (included), and export `GEMINI_API_KEY` (optional `GEMINI_MODEL`).
+    * **SciPy** – install `scipy` to use the KDTree implementation for grouping.
+
+### Choosing a translation backend
+
+`TRANSLATOR_PROVIDER` controls which API batches are sent to. It defaults to `cerebras`, which requires `CEREBRAS_API_KEY`. Set `TRANSLATOR_PROVIDER=gemini` to call Google’s Generative Language API with `GEMINI_API_KEY` (and optionally override `GEMINI_MODEL`). If the selected provider is unavailable, the server logs a warning and falls back to echoing the Korean text so the extension still renders overlays.
 
 3. Run the API locally:
 

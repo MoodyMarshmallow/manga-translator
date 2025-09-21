@@ -210,3 +210,6 @@ __marimo__/
 server/conversation_history.json
 
 google_credentials.json
+
+# Server logs
+logs/

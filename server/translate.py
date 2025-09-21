@@ -1,4 +1,4 @@
-"""Translation helpers using the Cerebras SDK when available."""
+"""Translation helpers with pluggable translation backends."""
 
 from __future__ import annotations
 
@@ -8,7 +8,9 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, Iterable, List, Protocol, Sequence, Tuple, cast
+from typing import Any, Dict, Iterable, List, Protocol, Sequence, Tuple, TypedDict, cast
+
+import requests
 
 from .types import WordGroup
 from .context_store import ContextEntry
@@ -149,12 +151,17 @@ def _status_code_from_error(error: Exception) -> int | None:
     return cast(int | None, status)
 
 
-def _group_sort_key(group: WordGroup) -> tuple[float, float]:
-    x0, y0, _, _ = group.get("bbox", (0.0, 0.0, 0.0, 0.0))
-    orientation = group.get("orientation", "horizontal")
-    if orientation == "vertical":
-        return (x0, y0)
-    return (y0, x0)
+class _AnnotatedGroup(TypedDict):
+    group: WordGroup
+    x_center: float
+    y_center: float
+    width: float
+
+
+class _Column(TypedDict):
+    x_center: float
+    tolerance: float
+    items: List[_AnnotatedGroup]
 
 
 def _batched_groups(
@@ -192,56 +199,143 @@ def _batched_groups(
         yield current_groups, current_payload
 
 
-def translate_groups_kr_to_en(
-    groups: Iterable[WordGroup],
-    *,
-    conversation_context: Sequence[ContextEntry] | None = None,
-) -> Dict[str, str]:
-    groups_list: List[WordGroup] = list(groups)
-    groups_list.sort(key=_group_sort_key)
-    client = _client()
-    if client is None:
-        return {g["id"]: g.get("kr_text", "") for g in groups_list}
+def _order_groups_left_to_right(groups: Sequence[WordGroup]) -> List[WordGroup]:
+    """Return groups ordered by columns (left→right) and rows (top→bottom)."""
 
-    context_items: List[Dict[str, str]] = []
-    if conversation_context:
-        for entry in conversation_context:
-            context_entry: Dict[str, str] = {}
-            kr_text = entry.get("kr", "")
-            en_text = entry.get("en", "")
-            if kr_text:
-                context_entry["kr"] = kr_text
-            if en_text:
-                context_entry["en"] = en_text
-            if context_entry:
-                context_items.append(context_entry)
-    context_json = json.dumps({"items": context_items}, ensure_ascii=False) if context_items else ""
-
-    all_translations: Dict[str, str] = {}
-    for batch_index, (batch_groups, payload) in enumerate(_batched_groups(groups_list)):
-        payload_json = json.dumps({"items": payload}, ensure_ascii=False)
-        system_prompt = (
-            "You are a professional manhwa translator. Translate Korean to natural sounding English while preserving honorifics when present. Translate the meaning of the sentences rather than the exact word-for-word meaning. Remember to translate ALL Korean to ONLY English. Return JSON only."
+    annotated: List[_AnnotatedGroup] = []
+    for group in groups:
+        bbox = group.get("bbox", (0.0, 0.0, 0.0, 0.0))
+        try:
+            x0, y0, x1, y1 = (float(coord) for coord in bbox)
+        except (TypeError, ValueError):
+            x0 = y0 = 0.0
+            x1 = x0 + 1.0
+            y1 = y0 + 1.0
+        width = max(x1 - x0, 1.0)
+        height = max(y1 - y0, 1.0)
+        annotated.append(
+            {
+                "group": group,
+                "x_center": x0 + width / 2.0,
+                "y_center": y0 + height / 2.0,
+                "width": width,
+            }
         )
+
+    if not annotated:
+        return list(groups)
+
+    columns: List[_Column] = []
+    for item in sorted(annotated, key=lambda entry: entry["x_center"]):
+        tolerance = max(item["width"] * 1.5, 64.0)
+        target_column: _Column | None = None
+        for column in columns:
+            if abs(item["x_center"] - column["x_center"]) <= column["tolerance"]:
+                target_column = column
+                break
+        if target_column is None:
+            target_column = {
+                "x_center": item["x_center"],
+                "tolerance": tolerance,
+                "items": [],
+            }
+            columns.append(target_column)
+        target_column["items"].append(item)
+        count = len(target_column["items"])
+        target_column["x_center"] += (item["x_center"] - target_column["x_center"]) / count
+        target_column["tolerance"] = max(target_column["tolerance"], tolerance)
+
+    ordered: List[WordGroup] = []
+    for column in sorted(columns, key=lambda col: col["x_center"]):
+        column["items"].sort(key=lambda entry: entry["y_center"])
+        ordered.extend(entry["group"] for entry in column["items"])
+    return ordered
+
+
+TRANSLATOR_PROVIDER_ENV = "TRANSLATOR_PROVIDER"
+DEFAULT_TRANSLATOR_PROVIDER = "cerebras"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+
+SYSTEM_PROMPT_TEXT = (
+    "You are a professional manhwa translator. Translate Korean to natural, concise English while preserving honorifics when present. Prioritise translating the meaning of the sentence in the narrative ratheer than preserving word-for-word accuracy. Remember translate Korean to English. Return JSON only."
+)
+
+USER_PROMPT_PREFIX = (
+    "Translate each Korean entry in the following JSON payload to English. Respond with JSON "
+    "matching the schema and include every id.\n"
+)
+
+
+class TranslationError(Exception):
+    """Raised when a translation provider cannot satisfy a batch request."""
+
+
+class Translator(Protocol):
+    def is_available(self) -> bool:
+        ...
+
+    def translate_batch(
+        self,
+        batch_groups: Sequence[WordGroup],
+        payload: List[Dict[str, str]],
+        *,
+        context_json: str | None,
+    ) -> Dict[str, str]:
+        ...
+
+
+class FallbackTranslator:
+    """Returns Korean text unchanged when no provider is configured."""
+
+    def is_available(self) -> bool:
+        return True
+
+    def translate_batch(
+        self,
+        batch_groups: Sequence[WordGroup],
+        payload: List[Dict[str, str]],
+        *,
+        context_json: str | None,
+    ) -> Dict[str, str]:
+        return {entry["id"]: entry.get("kr", "") for entry in payload if entry.get("id")}
+
+
+class CerebrasTranslator:
+    def __init__(self) -> None:
+        self._client = _client()
+
+    def is_available(self) -> bool:
+        return self._client is not None
+
+    def translate_batch(
+        self,
+        batch_groups: Sequence[WordGroup],
+        payload: List[Dict[str, str]],
+        *,
+        context_json: str | None,
+    ) -> Dict[str, str]:
+        client = self._client
+        if client is None:
+            raise TranslationError("Cerebras client unavailable")
+
+        payload_json = json.dumps({"items": payload}, ensure_ascii=False)
+        system_prompt = SYSTEM_PROMPT_TEXT
         if context_json:
             system_prompt += " Maintain consistency with the supplied prior dialogue context."
 
         user_sections: List[str] = []
         if context_json:
             user_sections.append("Earlier conversation context:\n" + context_json)
-        user_sections.append(
-            "Translate each Korean entry in the following JSON payload to English. Respond with JSON matching the schema and include every id.\n"
-            + payload_json
-        )
+        user_sections.append(USER_PROMPT_PREFIX + payload_json)
         user_prompt = "\n\n".join(user_sections)
 
-        response = None
         delay = float(INITIAL_RETRY_DELAY_SECONDS)
+        last_exception: Exception | None = None
         for attempt in range(MAX_RETRIES):
             try:
                 _respect_rate_limit()
                 response = client.chat.completions.create(
-                    model= "qwen-3-235b-a22b-instruct-2507",
+                    model="llama-3.3-70b",
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
@@ -249,53 +343,214 @@ def translate_groups_kr_to_en(
                     response_format=TRANSLATION_SCHEMA,
                     temperature=0.2,
                 )
-                break
-            except Exception as e:
-                status_code = _status_code_from_error(e)
+                choices: Sequence[Any] = getattr(response, "choices", [])
+                if not choices:
+                    raise TranslationError("Empty response from Cerebras API")
+                message: Any = getattr(choices[0], "message", {})
+                content = str(getattr(message, "content", ""))
+                data = json.loads(content)
+                return {
+                    item.get("id", ""): item.get("en", "")
+                    for item in data.get("items", [])
+                    if item.get("id")
+                }
+            except json.JSONDecodeError as exc:  # noqa: PERF203
+                logger.error("Failed to decode JSON from Cerebras response: %s", exc)
+                raise TranslationError("Malformed JSON from Cerebras API") from exc
+            except Exception as exc:  # noqa: PERF203
+                last_exception = exc
+                status_code = _status_code_from_error(exc)
                 logger.warning(
                     "Cerebras API call failed (attempt %s/%s, status %s): %s. Retrying in %.1fs...",
                     attempt + 1,
                     MAX_RETRIES,
                     status_code if status_code is not None else "unknown",
-                    e,
+                    exc,
                     delay,
                 )
                 time.sleep(delay)
-                retry_hint = _retry_after_seconds(e)
+                retry_hint = _retry_after_seconds(exc)
                 if retry_hint is not None:
                     delay = max(retry_hint, delay * 1.5)
                 else:
                     delay *= 1.5
 
-        if response:
-            choices: Sequence[Any] = getattr(response, "choices", [])
-            if choices:
-                message: Any = getattr(choices[0], "message", {})
-                content = str(getattr(message, "content", ""))
-                try:
-                    data = json.loads(content)
-                    translations = {
-                        item.get("id", ""): item.get("en", "")
-                        for item in data.get("items", [])
-                        if item.get("id")
-                    }
-                    for group in batch_groups:
-                        text = translations.get(group["id"], group.get("kr_text", ""))
-                        all_translations[group["id"]] = text or group.get("kr_text", "")
-                except json.JSONDecodeError:
-                    logger.error("Failed to decode JSON from API response: %s", content)
-                    for group in batch_groups:
-                        all_translations[group["id"]] = group.get("kr_text", "")
-                continue
+        raise TranslationError("Cerebras API call failed after retries") from last_exception
 
-        logger.error(
-            "API call failed for batch %s (size %s) after %s retries.",
-            batch_index,
-            len(batch_groups),
-            MAX_RETRIES,
+
+class GeminiTranslator:
+    def __init__(self) -> None:
+        self._api_key = os.environ.get("GEMINI_API_KEY")
+        self._model = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+        self._session = requests.Session()
+
+    def is_available(self) -> bool:
+        return bool(self._api_key)
+
+    def translate_batch(
+        self,
+        batch_groups: Sequence[WordGroup],
+        payload: List[Dict[str, str]],
+        *,
+        context_json: str | None,
+    ) -> Dict[str, str]:
+        if not self._api_key:
+            raise TranslationError("GEMINI_API_KEY not configured")
+
+        payload_json = json.dumps({"items": payload}, ensure_ascii=False)
+        instruction = SYSTEM_PROMPT_TEXT
+        user_sections: List[str] = []
+        if context_json:
+            user_sections.append("Earlier conversation context:\n" + context_json)
+        user_sections.append(USER_PROMPT_PREFIX + payload_json)
+        prompt_text = instruction + "\n\n" + "\n\n".join(user_sections)
+
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{self._model}:generateContent"
         )
+
+        delay = float(INITIAL_RETRY_DELAY_SECONDS)
+        last_exception: Exception | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = self._session.post(
+                    url,
+                    params={"key": self._api_key},
+                    json={
+                        "contents": [
+                            {
+                                "role": "user",
+                                "parts": [{"text": prompt_text}],
+                            }
+                        ],
+                        "generationConfig": {
+                            "temperature": 0.2,
+                        },
+                    },
+                    timeout=30,
+                )
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            delay = max(float(retry_after), delay * 1.5)
+                        except ValueError:
+                            delay *= 1.5
+                    else:
+                        delay *= 1.5
+                    raise TranslationError("Gemini rate limited")
+                response.raise_for_status()
+                body = response.json()
+                candidates = body.get("candidates", [])
+                if not candidates:
+                    raise TranslationError("Gemini returned no candidates")
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if not parts:
+                    raise TranslationError("Gemini candidate missing parts")
+                content_text = parts[0].get("text", "")
+                data = json.loads(content_text)
+                return {
+                    item.get("id", ""): item.get("en", "")
+                    for item in data.get("items", [])
+                    if item.get("id")
+                }
+            except (requests.RequestException, json.JSONDecodeError, TranslationError) as exc:
+                last_exception = exc
+                logger.warning(
+                    "Gemini API call failed (attempt %s/%s): %s. Retrying in %.1fs...",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    exc,
+                    delay,
+                )
+                time.sleep(delay)
+                delay *= 1.5
+
+        raise TranslationError("Gemini API call failed after retries") from last_exception
+
+
+_translator_instance: Translator | None = None
+
+
+def _build_context_json(
+    conversation_context: Sequence[ContextEntry] | None,
+) -> str | None:
+    if not conversation_context:
+        return None
+    items: List[Dict[str, str]] = []
+    for entry in conversation_context:
+        context_entry: Dict[str, str] = {}
+        kr_text = entry.get("kr", "")
+        en_text = entry.get("en", "")
+        if kr_text:
+            context_entry["kr"] = kr_text
+        if en_text:
+            context_entry["en"] = en_text
+        if context_entry:
+            items.append(context_entry)
+    if not items:
+        return None
+    return json.dumps({"items": items}, ensure_ascii=False)
+
+
+def _get_translator() -> Translator:
+    global _translator_instance
+    if _translator_instance is not None:
+        return _translator_instance
+
+    provider = os.environ.get(TRANSLATOR_PROVIDER_ENV, DEFAULT_TRANSLATOR_PROVIDER).lower().strip()
+    translator: Translator
+    if provider == "gemini":
+        translator = GeminiTranslator()
+    elif provider == "cerebras":
+        translator = CerebrasTranslator()
+    else:
+        logger.warning("Unknown translator provider '%s'; defaulting to Cerebras", provider)
+        translator = CerebrasTranslator()
+
+    if not translator.is_available():
+        logger.warning(
+            "Translator provider '%s' is unavailable; falling back to echo translations",
+            provider,
+        )
+        translator = FallbackTranslator()
+
+    _translator_instance = translator
+    return translator
+
+
+def translate_groups_kr_to_en(
+    groups: Iterable[WordGroup],
+    *,
+    conversation_context: Sequence[ContextEntry] | None = None,
+) -> Dict[str, str]:
+    groups_list = _order_groups_left_to_right(list(groups))
+
+    translator = _get_translator()
+    context_json = _build_context_json(conversation_context)
+
+    all_translations: Dict[str, str] = {}
+    for batch_index, (batch_groups, payload) in enumerate(_batched_groups(groups_list)):
+        try:
+            translations = translator.translate_batch(
+                batch_groups,
+                payload,
+                context_json=context_json,
+            )
+        except TranslationError as exc:
+            logger.error(
+                "Translation provider failed for batch %s (size %s): %s",
+                batch_index,
+                len(batch_groups),
+                exc,
+            )
+            translations = {}
+
         for group in batch_groups:
-            all_translations[group["id"]] = group.get("kr_text", "")
+            fallback_text = group.get("kr_text", "")
+            text = translations.get(group["id"], fallback_text)
+            all_translations[group["id"]] = text or fallback_text
 
     return all_translations
 

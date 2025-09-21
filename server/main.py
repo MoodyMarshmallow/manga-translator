@@ -18,6 +18,9 @@ from .ocr import document_ocr
 from .translate import translate_groups_kr_to_en
 from .context_store import ContextEntry, context_store
 from .types import OCRWord, WordGroup
+from .logging_config import configure_logging
+
+configure_logging()
 
 logger = logging.getLogger(__name__)
 

@@ -10,10 +10,10 @@
 2. **OCR extraction** – `document_ocr` (`server/ocr.py`) best-effort calls Google Cloud Vision `document_text_detection`. If the SDK or credentials are missing, it returns a single fallback word spanning the full frame with a placeholder message.
 3. **Word grouping** – `group_words` (`server/grouping.py`) converts OCR polygons to boxes, builds a proximity graph (KDTree when SciPy is present, otherwise a naïve pass), finds connected components, and emits groups with bounding boxes, orientations, and indexes back into the OCR list.
 4. **Text reconstruction** – for each group, the handler gathers the original OCR words, sorts them by orientation (vertical bubbles sorted right-to-left top-to-bottom, horizontal bubbles top-to-bottom left-to-right), and concatenates their text into `kr_text`.
-5. **Translation** – `translate_groups_kr_to_en` (`server/translate.py`) sorts groups for stable batching, then:
-   - Instantiates a Cerebras client when `cerebras.cloud.sdk` and `CEREBRAS_API_KEY` are available; otherwise it falls back to echoing the Korean text.
-   - Bundles groups into JSON payloads containing up to 40 bubbles (capped at ~12k characters) so each request pushes as much work as possible without blowing the context window, then sends that payload to the `llama-3.3-70b` model with a strict JSON schema, throttling to ~1 request/sec and retrying up to three times with exponential backoff and optional `Retry-After` hints.
-   - Defaults any failed batch items back to their original Korean text so every group always has content.
+5. **Translation** – `translate_groups_kr_to_en` (`server/translate.py`) orders groups left-to-right (column by column) and top-to-bottom before batching, then hands each JSON payload to the active provider (configured via `TRANSLATOR_PROVIDER`):
+   - **Cerebras** – uses `llama-3.3-70b` through the Cerebras SDK when `cerebras.cloud.sdk` and `CEREBRAS_API_KEY` are present, respecting the shared rate limiter and structured JSON schema.
+   - **Gemini** – calls the Google Generative Language API (`GEMINI_API_KEY`, optional `GEMINI_MODEL`) with the same payload, requesting JSON output and retrying on transient 429/5xxs.
+   - When neither backend is available, it transparently echoes the Korean text so the extension still renders overlays.
 6. **Response assembly** – the handler copies translations back onto each group, measures the image dimensions with Pillow, and returns `ocr_image_size` plus per-group metadata (`bbox`, `orientation`, `kr_text`, `en_text`).
 
 ## Overlay Rendering
@@ -23,4 +23,4 @@
 
 ## Failure Modes & Fallbacks
 - Missing OCR dependencies or empty OCR results produce a placeholder group so the extension still renders a clear failure message.
-- Translation failures log warnings and surface the untouched Korean text while respecting Cerebras rate limits and retries.
+- Translation failures log warnings and surface the untouched Korean text while respecting provider-specific throttling and retries.
