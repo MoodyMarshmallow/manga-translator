@@ -1,5 +1,5 @@
 # Manga Translator
-[![Watch the video](https://img.youtube.com/vi/j_XAp7havFI/maxresdefault.jpg)](https://youtu.be/j_XAp7havFI)
+<video src="assets/Comic Buddy PennApps 2025.mp4" controls width="720" poster="" />
 
 This repository contains a minimal Chrome extension and a FastAPI backend that work together to translate manga pages. The extension discovers large images on the active tab, sends them to the backend for OCR + translation, and overlays English text bubbles back on the page. Made in 36 hours at PennApps 2025.
 
